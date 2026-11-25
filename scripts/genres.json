@@ -1,0 +1,97 @@
+[
+ {
+  "key": "rice",
+  "rakuten": [
+   201184,
+   507725
+  ]
+ },
+ {
+  "key": "meat",
+  "rakuten": [
+   100228
+  ]
+ },
+ {
+  "key": "seafood",
+  "rakuten": [
+   100236
+  ]
+ },
+ {
+  "key": "fruit",
+  "rakuten": [
+   100246
+  ]
+ },
+ {
+  "key": "sake",
+  "rakuten": [
+   100337,
+   110662
+  ]
+ },
+ {
+  "key": "water",
+  "rakuten": [
+   201351
+  ]
+ },
+ {
+  "key": "egg",
+  "rakuten": [
+   201085
+  ]
+ },
+ {
+  "key": "drink",
+  "rakuten": [
+   110692,
+   506536,
+   565599
+  ]
+ },
+ {
+  "key": "beer",
+  "rakuten": [
+   100324
+  ]
+ },
+ {
+  "key": "honey",
+  "rakuten": [
+   567681
+  ]
+ },
+ {
+  "key": "wine",
+  "rakuten": [
+   100317
+  ]
+ },
+ {
+  "key": "vegetable",
+  "rakuten": [
+   200990
+  ]
+ },
+ {
+  "key": "miso",
+  "rakuten": [
+   201213
+  ]
+ },
+ {
+  "key": "oil",
+  "rakuten": [
+   201252,
+   201256,
+   214291,
+   201253,
+   201260,
+   201258,
+   201254,
+   100306
+  ]
+ }
+]

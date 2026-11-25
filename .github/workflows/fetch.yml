@@ -1,0 +1,132 @@
+name: fetch
+# Runs scripts/fetch.py (Rakuten Ichiba item search API, furusato-nozei items) on a Linux runner,
+# then hands the result to the site's build. The fetched data is never stored in this repo:
+# it is encrypted (AES-256, key in secrets) before it is uploaded as an artifact.
+run-name: ${{ (github.event_name == 'schedule' || github.event.inputs.source == 'night') && 'fetch (night)' || 'fetch' }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      genres:
+        description: "Genres to fetch (blank = all, e.g. rice meat). Others keep the previous data"
+        required: false
+        default: ""
+      source:
+        description: "night = the regular run (set by the scheduler). Leave blank when running by hand"
+        required: false
+        default: ""
+      build:
+        description: "Start the site build after fetching"
+        type: boolean
+        default: true
+  schedule:
+    # Backup only (the regular run is dispatched at 13:07 UTC Mon/Thu). 16:07 UTC Mon/Thu = 1:07 JST Tue/Fri
+    - cron: "7 16 * 10-12 1,4"
+    - cron: "7 16 * 1-9 4"
+
+# No pull_request triggers: workflows from forks never run here, so secrets are never exposed to them.
+permissions:
+  contents: read
+  actions: read # read this repo's previous run (encrypted data)
+
+concurrency:
+  group: fetch
+  cancel-in-progress: false
+
+jobs:
+  fetch:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    env:
+      REPO: ${{ github.repository }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Gate
+        id: gate
+        env:
+          EVENT: ${{ github.event_name }}
+          SOURCE: ${{ github.event.inputs.source }}
+        run: |
+          # Only the regular runs are thinned out. Dates are judged 3 hours ahead (a Mon/Thu 22:07 JST run counts as Tue/Fri)
+          if [ "$EVENT" != "schedule" ] && [ "$SOURCE" != "night" ]; then echo "run=true" >> "$GITHUB_OUTPUT"; exit 0; fi
+          month=$(TZ=Asia/Tokyo date -d '+3 hours' +%-m)
+          day=$(TZ=Asia/Tokyo date -d '+3 hours' +%-d)
+          dow=$(TZ=Asia/Tokyo date -d '+3 hours' +%u)
+          if [ "$month" -lt 10 ] && { [ "$dow" != "5" ] || [ "$day" -lt 8 ] || [ "$day" -gt 21 ]; }; then
+            echo "Jan-Sep: only the 2nd and 3rd Friday"; echo "run=false" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          if [ "$EVENT" = "schedule" ]; then
+            since=$(date -u -d '-24 hours' +%Y-%m-%dT%H:%M:%SZ)
+            n=$(gh api "repos/$REPO/actions/workflows/fetch.yml/runs?event=workflow_dispatch&created=%3E%3D$since" \
+              --jq '[.workflow_runs[] | select(.display_title == "fetch (night)")] | length' || echo 0)
+            if [ "${n:-0}" -gt 0 ]; then echo "The regular run already started ($n in 24h). Backup does nothing"; echo "run=false" >> "$GITHUB_OUTPUT"; exit 0; fi
+          fi
+          echo "run=true" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        if: steps.gate.outputs.run == 'true'
+
+      - uses: actions/setup-python@v5
+        if: steps.gate.outputs.run == 'true'
+        with:
+          python-version: "3.12"
+
+      # The previous data is used to compare counts, to fill price ranges that failed, and for genres not fetched this time
+      - name: Restore previous data (encrypted artifact of an earlier run)
+        if: steps.gate.outputs.run == 'true'
+        env:
+          DATA_KEY: ${{ secrets.DATA_KEY }}
+        run: |
+          mkdir -p data/raw
+          for id in $(gh run list -R "$REPO" --workflow fetch.yml --status success --limit 15 --json databaseId --jq '.[].databaseId'); do
+            if gh run download "$id" -R "$REPO" -n raw-enc -D .prev 2>/dev/null; then
+              openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -pass env:DATA_KEY -in .prev/raw.tar.gz.enc | tar xz data/raw
+              rm -rf .prev
+              echo "restored from run $id: $(ls data/raw | wc -l) genres"
+              exit 0
+            fi
+          done
+          echo "::warning::no previous data (every genre is fetched)"
+
+      - name: Fetch
+        if: steps.gate.outputs.run == 'true'
+        working-directory: scripts
+        env:
+          RAKUTEN_APP_ID: ${{ secrets.RAKUTEN_APP_ID }}
+          RAKUTEN_ACCESS_KEY: ${{ secrets.RAKUTEN_ACCESS_KEY }}
+          RAKUTEN_AFFILIATE_ID: ${{ secrets.RAKUTEN_AFFILIATE_ID }}
+          RAKUTEN_ALLOWED_SITE: ${{ secrets.RAKUTEN_ALLOWED_SITE }}
+          GENRES: ${{ github.event.inputs.genres }}
+        run: |
+          # Genres without previous data are always fetched
+          missing=$(python -c "import fetch, os; print(' '.join(g for g in fetch.GENRES if not os.path.exists(f'../data/raw/{g}.json')))")
+          targets=""
+          if [ -n "$GENRES" ]; then targets=$(echo $GENRES $missing | xargs -n1 | sort -u | xargs); fi
+          echo "genres: ${targets:-all}"
+          python -u fetch.py $targets
+
+      # Encrypt before upload: artifacts of a public repo can be downloaded by anyone signed in to GitHub
+      - name: Encrypt and upload
+        if: steps.gate.outputs.run == 'true'
+        env:
+          DATA_KEY: ${{ secrets.DATA_KEY }}
+        run: |
+          [ -n "$DATA_KEY" ] || { echo "DATA_KEY is not set"; exit 1; }
+          mkdir -p out
+          tar czf - data/raw logs | openssl enc -aes-256-cbc -pbkdf2 -iter 200000 -salt -pass env:DATA_KEY -out out/raw.tar.gz.enc
+          ls -l out
+      - uses: actions/upload-artifact@v4
+        if: steps.gate.outputs.run == 'true'
+        with:
+          name: raw-enc
+          path: out/raw.tar.gz.enc
+          retention-days: 45 # Jan-Sep runs are up to ~5 weeks apart; the next run restores from here
+          compression-level: 0 # already compressed and encrypted
+
+      - name: Start the site build
+        if: steps.gate.outputs.run == 'true' && (github.event_name == 'schedule' || github.event.inputs.build == 'true')
+        env:
+          GH_TOKEN: ${{ secrets.SITE_DISPATCH_TOKEN }}
+          SITE_REPO: ${{ secrets.SITE_REPO }}
+          NIGHT: ${{ (github.event_name == 'schedule' || github.event.inputs.source == 'night') && 'night' || '' }}
+        run: gh workflow run daily.yml -R "$SITE_REPO" -f fetch_run="${{ github.run_id }}" -f source="$NIGHT"
